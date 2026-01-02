@@ -1,19 +1,27 @@
-name: Gradle Build
+name: Build and Release
 
 on:
   push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
+    tags:
+      - 'v*'  # 只有推送到v开头的标签时触发
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      version:
+        description: '版本号 (例如: v1.0.0)'
+        required: true
+        default: 'v1.0.0'
 
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Set up JDK
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           java-version: '21'
@@ -22,7 +30,7 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Cache Gradle packages
+      - name: Cache Gradle dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -32,5 +40,61 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Build with Gradle
-        run: ./gradlew deploy
+      - name: Build shadowJar
+        run: ./gradlew buildProj:shadowJar --stacktrace
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          if [[ -n "${{ github.ref_name }}" ]]; then
+            echo "TAG_VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG_VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          fi
+          echo "Version: ${{ steps.get_version.outputs.TAG_VERSION }}"
+
+      - name: Find JAR file
+        id: find_jar
+        run: |
+          # 查找主要的JAR文件（排除sources和javadoc）
+          JAR_FILE=$(find buildProj/build/libs -name "*.jar" ! -name "*-sources.jar" ! -name "*-javadoc.jar" -type f | head -n 1)
+          if [ -z "$JAR_FILE" ]; then
+            echo "没有找到JAR文件"
+            exit 1
+          fi
+          echo "JAR_FILE=$JAR_FILE" >> $GITHUB_OUTPUT
+          echo "JAR_NAME=$(basename $JAR_FILE)" >> $GITHUB_OUTPUT
+          echo "找到JAR文件: $JAR_FILE"
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Terraform Generator ${{ steps.get_version.outputs.TAG_VERSION }}
+          tag_name: ${{ steps.get_version.outputs.TAG_VERSION }}
+          body: |
+            ## Terraform Generator ${{ steps.get_version.outputs.TAG_VERSION }}
+            
+            ### 构建信息
+            - 构建时间: ${{ github.event.repository.updated_at || github.run_started_at }}
+            - 提交哈希: ${{ github.sha }}
+            - Java版本: 21
+            
+            ### 使用说明
+            下载 `${{ steps.find_jar.outputs.JAR_NAME }}` 文件即可使用。
+            
+            ### 更新日志
+            查看提交历史或项目文档了解更多详情。
+          draft: false
+          prerelease: false
+          files: |
+            ${{ steps.find_jar.outputs.JAR_FILE }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Output release info
+        run: |
+          echo "✅ 发布成功!"
+          echo "版本: ${{ steps.get_version.outputs.TAG_VERSION }}"
+          echo "Release URL: ${{ steps.create_release.outputs.url }}"
+          echo "JAR文件: ${{ steps.find_jar.outputs.JAR_NAME }}"
